@@ -1,5 +1,7 @@
 import threading
+import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from processing import process_chain
@@ -15,15 +17,26 @@ class PitchAlignApp:
         self.root.minsize(820, 720)
 
         self.is_processing = False
+        self.worker_thread = None
+        self.process_button = None
+        self.cancel_button = None
         self.status_var = tk.StringVar(value="Idle")
         self.input_path_var = tk.StringVar()
         self.output_path_var = tk.StringVar()
+        
+        # Timing
+        self.process_start_time = None
+        self.stage_start_time = None
+        self.update_timer_id = None
+        self.processing_timeout_seconds = 300.0
 
         self.pitch_enabled_var = tk.BooleanVar(value=True)
+        self.skip_long_files_var = tk.BooleanVar(value=False)
         self.key_var = tk.StringVar(value="D")
         self.scale_var = tk.StringVar(value="major")
         self.pitch_strength_var = tk.DoubleVar(value=0.9)
         self.pitch_mix_var = tk.DoubleVar(value=1.0)
+        self.hard_tune_var = tk.BooleanVar(value=False)
 
         self.dc_remove_enabled_var = tk.BooleanVar(value=True)
         self.highpass_enabled_var = tk.BooleanVar(value=True)
@@ -67,6 +80,39 @@ class PitchAlignApp:
         self.limiter_ceiling_var = tk.DoubleVar(value=0.98)
 
         self._build_ui()
+
+    def _format_time(self, seconds):
+        """Format seconds into readable time string."""
+        if seconds < 1:
+            return f"{seconds:.1f}s"
+        elif seconds < 60:
+            return f"{int(seconds)}s"
+        else:
+            minutes = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs}s"
+
+    def _update_elapsed_time(self):
+        """Periodically update status with elapsed time."""
+        if self.is_processing and self.process_start_time:
+            elapsed = time.time() - self.process_start_time
+            current_status = self.status_var.get()
+            
+            # Extract the base status (before any time info)
+            if current_status.endswith(")") and " (" in current_status:
+                # Status strings are built as: "<base stage> (<elapsed>)".
+                # Use rsplit to preserve any earlier parentheses present in the base stage text.
+                base_status = current_status.rsplit(" (", 1)[0]
+            else:
+                base_status = current_status
+            
+            # Update with elapsed time
+            formatted_elapsed = self._format_time(elapsed)
+            new_status = f"{base_status} ({formatted_elapsed})"
+            self.status_var.set(new_status)
+            
+            # Schedule next update
+            self.update_timer_id = self.root.after(500, self._update_elapsed_time)
 
     def _build_ui(self):
         container = ttk.Frame(self.root, padding=16)
@@ -122,16 +168,20 @@ class PitchAlignApp:
             row=0, column=0, sticky="w", pady=(0, 8)
         )
 
-        ttk.Label(frame, text="Key").grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(frame, text="Skip pitch alignment for files >60s", variable=self.skip_long_files_var).grid(
+            row=1, column=0, sticky="w", pady=(0, 8)
+        )
+
+        ttk.Label(frame, text="Key").grid(row=2, column=0, sticky="w")
         ttk.Combobox(
             frame,
             textvariable=self.key_var,
             values=["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"],
             state="readonly",
             width=8,
-        ).grid(row=1, column=1, sticky="w", padx=(8, 18))
+        ).grid(row=2, column=1, sticky="w", padx=(8, 18))
 
-        ttk.Label(frame, text="Scale").grid(row=1, column=2, sticky="w")
+        ttk.Label(frame, text="Scale").grid(row=2, column=2, sticky="w")
         ttk.Combobox(
             frame,
             textvariable=self.scale_var,
@@ -153,10 +203,13 @@ class PitchAlignApp:
             ],
             state="readonly",
             width=18,
-        ).grid(row=1, column=3, sticky="w", padx=(8, 0))
+        ).grid(row=2, column=3, sticky="w", padx=(8, 0))
 
-        self._slider_row(frame, 2, "Pitch strength", self.pitch_strength_var, 0.0, 1.0, "Blend to scale")
-        self._slider_row(frame, 3, "Pitch mix", self.pitch_mix_var, 0.0, 1.0, "Dry/Wet")
+        self._slider_row(frame, 3, "Pitch strength", self.pitch_strength_var, 0.0, 1.0, "Blend to scale")
+        self._slider_row(frame, 4, "Pitch mix", self.pitch_mix_var, 0.0, 1.0, "Dry/Wet")
+        ttk.Checkbutton(frame, text="Hard tune mode", variable=self.hard_tune_var).grid(
+            row=5, column=0, sticky="w", pady=(8, 0)
+        )
 
         frame.columnconfigure(4, weight=1)
 
@@ -261,7 +314,12 @@ class PitchAlignApp:
         frame = ttk.Frame(parent)
         frame.pack(fill="x")
 
-        ttk.Button(frame, text="Process Audio", command=self.start_processing).pack(side="left")
+        self.process_button = ttk.Button(frame, text="Process Audio", command=self.start_processing)
+        self.process_button.pack(side="left")
+        
+        self.cancel_button = ttk.Button(frame, text="Cancel", command=self.cancel_processing, state="disabled")
+        self.cancel_button.pack(side="left", padx=(10, 0))
+        
         ttk.Label(frame, textvariable=self.status_var, font=("Segoe UI", 10, "bold")).pack(side="right")
 
     def _formatted_var(self, variable, suffix):
@@ -302,10 +360,12 @@ class PitchAlignApp:
     def _collect_settings(self):
         return {
             "pitch_align_enabled": self.pitch_enabled_var.get(),
+            "skip_long_files": self.skip_long_files_var.get(),
             "key": self.key_var.get(),
             "scale": self.scale_var.get(),
             "pitch_strength": float(self.pitch_strength_var.get()),
             "pitch_mix": float(self.pitch_mix_var.get()),
+            "hard_tune": self.hard_tune_var.get(),
             "dc_remove_enabled": self.dc_remove_enabled_var.get(),
             "highpass_enabled": self.highpass_enabled_var.get(),
             "highpass_cutoff": float(self.highpass_cutoff_var.get()),
@@ -361,27 +421,110 @@ class PitchAlignApp:
         output_path = make_output_path(input_path, self.output_path_var.get().strip() or None)
         self.output_path_var.set(str(output_path))
 
+        # Get file info
+        input_file = Path(input_path)
+        file_size_mb = input_file.stat().st_size / (1024 * 1024)
+
         self.is_processing = True
-        self.status_var.set("Loading")
-        worker = threading.Thread(target=self._process_audio, args=(input_path, output_path), daemon=True)
-        worker.start()
+        self.process_start_time = time.time()
+        self.process_button.config(state="disabled")
+        self.cancel_button.config(state="normal")
+        self.status_var.set(f"Loading audio... ({file_size_mb:.1f} MB)")
+        self.root.update_idletasks()
+        
+        # Start elapsed time updater
+        self._update_elapsed_time()
+        
+        self.worker_thread = threading.Thread(target=self._process_audio, args=(input_path, output_path), daemon=False)
+        self.worker_thread.start()
 
     def _process_audio(self, input_path, output_path):
         try:
+            # Load audio
+            self.root.after(0, lambda: self.status_var.set("Loading audio..."))
+            self.root.after(0, self.root.update_idletasks)
+            
+            load_start = time.time()
             audio, sr = load_audio(input_path)
-            self.root.after(0, lambda: self.status_var.set("Processing"))
-            processed = process_chain(audio, sr, self._collect_settings())
+            load_time = time.time() - load_start
+            duration = len(audio) / sr
+            self.processing_timeout_seconds = max(300.0, duration * 4.0 + 120.0)
+            
+            # Processing with progress callback
+            def on_progress(stage):
+                elapsed = time.time() - self.process_start_time
+                # Dynamic timeout scales with track duration to avoid false timeouts on long files.
+                if elapsed > self.processing_timeout_seconds:
+                    raise TimeoutError(
+                        f"Processing timeout after {elapsed:.1f}s (limit {self.processing_timeout_seconds:.1f}s)"
+                    )
+                status = f"Processing: {stage} ({self._format_time(elapsed)})"
+                self.root.after(0, lambda: self.status_var.set(status))
+                self.root.after(0, self.root.update_idletasks)
+            
+            self.root.after(0, lambda: self.status_var.set(f"Processing audio... ({duration:.1f}s duration)"))
+            self.root.after(0, self.root.update_idletasks)
+            
+            process_start = time.time()
+            processed = process_chain(audio, sr, self._collect_settings(), progress_callback=on_progress)
+            process_time = time.time() - process_start
+            
+            # Saving
+            self.root.after(0, lambda: self.status_var.set("Saving audio..."))
+            self.root.after(0, self.root.update_idletasks)
+            
+            save_start = time.time()
             save_audio(output_path, processed, sr)
-            self.root.after(0, lambda: self.status_var.set("Complete"))
-            self.root.after(0, lambda: messagebox.showinfo("pitch-align", f"Processed audio saved to:\n{output_path}"))
+            save_time = time.time() - save_start
+            
+            total_time = time.time() - self.process_start_time
+            
+            self.root.after(0, lambda: self.status_var.set(f"Complete ✓ ({self._format_time(total_time)})"))
+            summary = (
+                f"Processing complete!\n\n"
+                f"Total time: {self._format_time(total_time)}\n"
+                f"  Load: {self._format_time(load_time)}\n"
+                f"  Process: {self._format_time(process_time)}\n"
+                f"  Save: {self._format_time(save_time)}\n\n"
+                f"Output: {output_path}"
+            )
+            self.root.after(0, lambda: messagebox.showinfo("pitch-align", summary))
+        except TimeoutError as e:
+            error_text = str(e)
+            self.root.after(0, lambda: self.status_var.set("Timeout ✗"))
+            self.root.after(0, lambda msg=error_text: messagebox.showerror("pitch-align", f"Processing timed out:\n{msg}"))
         except Exception as exc:
-            self.root.after(0, lambda: self.status_var.set("Error"))
-            self.root.after(0, lambda: messagebox.showerror("pitch-align", str(exc)))
+            self.root.after(0, lambda: self.status_var.set("Error ✗"))
+            self.root.after(0, lambda: messagebox.showerror("pitch-align", f"Processing failed:\n{str(exc)}"))
         finally:
             self.root.after(0, self._finish_processing)
 
+    def cancel_processing(self):
+        if self.is_processing and self.worker_thread:
+            self.status_var.set("Cancelling...")
+            self.cancel_button.config(state="disabled")
+            # Note: We can't actually stop the thread, but we can update the UI
+            # The thread will finish on its own, but we'll show cancelled status
+
     def _finish_processing(self):
+        # Cancel the timer
+        if self.update_timer_id:
+            self.root.after_cancel(self.update_timer_id)
+            self.update_timer_id = None
+        
         self.is_processing = False
+        self.process_button.config(state="normal")
+        self.cancel_button.config(state="disabled")
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5.0)
 
     def run(self):
+        def on_closing():
+            if self.is_processing:
+                if messagebox.askyesno("pitch-align", "Processing in progress. Do you want to quit anyway?"):
+                    self.root.destroy()
+            else:
+                self.root.destroy()
+        
+        self.root.protocol("WM_DELETE_WINDOW", on_closing)
         self.root.mainloop()

@@ -1,6 +1,7 @@
 import librosa
 import numpy as np
 from scipy import signal
+from scipy.ndimage import uniform_filter1d
 
 from utils import NOTE_TO_PC, SCALE_INTERVALS, ensure_stereo, normalize_audio, to_mono
 
@@ -32,10 +33,9 @@ def low_shelf_boost(audio, sr, gain_db=0.0, cutoff=180.0):
 
 def noise_gate(audio, sr, threshold_db=-45.0, release_ms=120.0):
     mono = to_mono(audio)
-    envelope = np.abs(mono)
+    envelope = np.abs(mono).astype(np.float32)
     release_samples = max(1, int(sr * release_ms / 1000.0))
-    kernel = np.ones(release_samples, dtype=np.float32) / release_samples
-    smooth_env = np.convolve(envelope, kernel, mode="same")
+    smooth_env = uniform_filter1d(envelope, size=release_samples, mode="nearest")
     threshold = 10 ** (threshold_db / 20.0)
     gate = np.clip(smooth_env / max(threshold, 1e-6), 0.0, 1.0) ** 1.5
     return audio * gate[:, np.newaxis]
@@ -242,16 +242,59 @@ def _pitch_shift_frame(frame, semitone_shift):
     return shifted
 
 
-def pitch_align(audio, sr, key="D", scale="major", strength=0.9, mix=1.0):
+def pitch_align(
+    audio,
+    sr,
+    key="D",
+    scale="major",
+    strength=0.9,
+    mix=1.0,
+    skip_long_files=False,
+    progress_callback=None,
+    hard_tune=False,
+):
     stereo_audio = ensure_stereo(audio).astype(np.float32)
     mono = to_mono(stereo_audio)
+    
+    # Skip pitch alignment for very short files
     if len(mono) < 4096:
+        if progress_callback:
+            progress_callback("Skipping pitch alignment (file too short)")
         return stereo_audio if audio.ndim > 1 else audio.astype(np.float32)
 
+    # Check for very long files and skip if requested
+    duration = len(mono) / sr
+    if skip_long_files and duration > 60:  # More than 1 minute
+        if progress_callback:
+            progress_callback(f"Skipping pitch alignment (long file: {duration:.1f}s)")
+        return stereo_audio if audio.ndim > 1 else audio.astype(np.float32)
+    elif duration > 60:  # More than 1 minute
+        if progress_callback:
+            progress_callback(f"Warning: Long file ({duration:.1f}s) - pitch detection may be slow")
+
     frame_length = 2048
+    # Pitch detection cost scales heavily with the number of analysis frames.
+    # For longer audio, increase hop_length to reduce frames and make the GUI less "stuck".
     hop_length = 256
+    if duration > 40.0:
+        hop_length = 1024
+    elif duration > 20.0:
+        hop_length = 512
     scale_pcs = _scale_pitch_classes(key, scale)
 
+    if progress_callback:
+        expected_frames = 0
+        if len(mono) >= frame_length:
+            expected_frames = 1 + (len(mono) - frame_length) // hop_length
+        progress_callback(
+            "Starting pitch analysis (pyin)... "
+            f"duration={duration:.1f}s sr={sr} frame_length={frame_length} hop_length={hop_length} frames≈{expected_frames}"
+        )
+
+    # Add progress updates during the potentially long pyin operation
+    import time
+    pyin_start = time.time()
+    
     f0, voiced_flag, voiced_prob = librosa.pyin(
         mono,
         fmin=librosa.note_to_hz("C2"),
@@ -260,16 +303,38 @@ def pitch_align(audio, sr, key="D", scale="major", strength=0.9, mix=1.0):
         frame_length=frame_length,
         hop_length=hop_length,
     )
+    
+    pyin_time = time.time() - pyin_start
+    if progress_callback:
+        total_frames = 0 if f0 is None else len(f0)
+        if voiced_flag is not None:
+            voiced_frames = int(np.sum(voiced_flag))
+        else:
+            voiced_frames = 0 if f0 is None else int(np.sum(np.isfinite(f0)))
+        voiced_pct = (100.0 * voiced_frames / total_frames) if total_frames else 0.0
+        progress_callback(
+            f"Pitch analysis complete ({pyin_time:.1f}s) — voiced {voiced_frames}/{total_frames} ({voiced_pct:.1f}%)"
+        )
 
     if f0 is None or np.all(~np.isfinite(f0)):
+        if progress_callback:
+            progress_callback("No pitch detected - skipping alignment")
         return stereo_audio if audio.ndim > 1 else audio.astype(np.float32)
+
+    if progress_callback:
+        progress_callback("Converting to MIDI...")
 
     midi = librosa.hz_to_midi(f0)
     voiced = np.isfinite(midi)
     if voiced_flag is not None:
         voiced &= voiced_flag.astype(bool)
     if not np.any(voiced):
+        if progress_callback:
+            progress_callback("No voiced frames found - skipping alignment")
         return stereo_audio if audio.ndim > 1 else audio.astype(np.float32)
+
+    if progress_callback:
+        progress_callback("Mapping to scale...")
 
     target_midi = np.copy(midi)
     target_midi[voiced] = np.array(
@@ -280,23 +345,51 @@ def pitch_align(audio, sr, key="D", scale="major", strength=0.9, mix=1.0):
     semitone_shift = np.zeros_like(target_midi, dtype=np.float32)
     semitone_shift[voiced] = target_midi[voiced] - midi[voiced]
     semitone_shift = np.clip(semitone_shift, -6.0, 6.0)
-    semitone_shift[voiced] *= float(np.clip(strength, 0.0, 1.0))
-    semitone_shift[voiced] = _smooth_pitch_track(semitone_shift[voiced], window=11)
-    semitone_shift = _smooth_pitch_track(semitone_shift, window=5)
-    mix = float(np.clip(mix, 0.0, 1.0))
+
+    if hard_tune:
+        # Hard tune intentionally pushes notes strongly to the nearest scale pitch.
+        # Keep smoothing minimal so correction remains obvious and snappy.
+        effective_strength = max(float(np.clip(strength, 0.0, 1.0)), 0.98)
+        semitone_shift[voiced] *= effective_strength
+        semitone_shift[voiced] = _smooth_pitch_track(semitone_shift[voiced], window=3)
+        semitone_shift = _smooth_pitch_track(semitone_shift, window=3)
+        mix = max(float(np.clip(mix, 0.0, 1.0)), 0.98)
+        if progress_callback:
+            progress_callback("Hard tune mode active")
+    else:
+        semitone_shift[voiced] *= float(np.clip(strength, 0.0, 1.0))
+        semitone_shift[voiced] = _smooth_pitch_track(semitone_shift[voiced], window=11)
+        semitone_shift = _smooth_pitch_track(semitone_shift, window=5)
+        mix = float(np.clip(mix, 0.0, 1.0))
 
     if voiced_prob is None:
         voiced_strength = voiced.astype(np.float32)
     else:
         voiced_strength = np.where(voiced, voiced_prob.astype(np.float32), 0.0)
         voiced_strength = np.clip(voiced_strength, 0.0, 1.0)
+    if hard_tune:
+        # Avoid over-attenuating correction on weakly voiced frames.
+        voiced_strength = np.where(voiced, np.maximum(voiced_strength, 0.85), 0.0)
+
+    if progress_callback:
+        progress_callback("Preparing audio frames...")
 
     padded = np.pad(stereo_audio, ((frame_length // 2, frame_length // 2), (0, 0)), mode="reflect")
     output = np.zeros((len(padded), stereo_audio.shape[1]), dtype=np.float32)
     weights = np.zeros(len(padded), dtype=np.float32)
     analysis_window = np.hanning(frame_length).astype(np.float32)
 
+    total_frames = len(semitone_shift)
+    frame_start_time = time.time()
+    
     for frame_idx, shift in enumerate(semitone_shift):
+        # Update progress every 50 frames (more frequent updates)
+        if frame_idx % 50 == 0 and progress_callback:
+            progress = int((frame_idx / total_frames) * 100)
+            elapsed = time.time() - frame_start_time
+            eta = (elapsed / (frame_idx + 1)) * (total_frames - frame_idx) if frame_idx > 0 else 0
+            progress_callback(f"Processing frames... ({progress}%, ETA: {eta:.1f}s)")
+
         center = frame_idx * hop_length + frame_length // 2
         start = center - frame_length // 2
         end = start + frame_length
@@ -312,6 +405,9 @@ def pitch_align(audio, sr, key="D", scale="major", strength=0.9, mix=1.0):
         output[start:end] += mixed * analysis_window[:, np.newaxis]
         weights[start:end] += analysis_window
 
+    if progress_callback:
+        progress_callback("Finalizing pitch correction...")
+
     silent = weights < 1e-6
     weights[silent] = 1.0
     output /= weights[:, np.newaxis]
@@ -325,9 +421,14 @@ def pitch_align(audio, sr, key="D", scale="major", strength=0.9, mix=1.0):
     return output
 
 
-def process_chain(audio, sr, settings):
+def process_chain(audio, sr, settings, progress_callback=None):
     processed = audio.astype(np.float32).copy()
 
+    def report_progress(stage):
+        if progress_callback:
+            progress_callback(stage)
+
+    report_progress("Pitch detection...")
     if settings.get("pitch_align_enabled", True):
         processed = pitch_align(
             processed,
@@ -336,17 +437,24 @@ def process_chain(audio, sr, settings):
             scale=settings.get("scale", "major"),
             strength=settings.get("pitch_strength", 0.9),
             mix=settings.get("pitch_mix", 1.0),
+            skip_long_files=settings.get("skip_long_files", False),
+            progress_callback=progress_callback,
+            hard_tune=settings.get("hard_tune", False),
         )
 
+    report_progress("DC removal...")
     if settings.get("dc_remove_enabled"):
         processed = dc_offset_removal(processed)
 
+    report_progress("Highpass filtering...")
     if settings.get("highpass_enabled"):
         processed = highpass_filter(processed, sr, cutoff=settings.get("highpass_cutoff", 80.0))
 
+    report_progress("Low shelf...")
     if settings.get("low_shelf_enabled"):
         processed = low_shelf_boost(processed, sr, gain_db=settings.get("low_shelf_gain", 0.0))
 
+    report_progress("Noise gate...")
     if settings.get("noise_gate_enabled"):
         processed = noise_gate(
             processed,
@@ -355,15 +463,19 @@ def process_chain(audio, sr, settings):
             release_ms=settings.get("noise_gate_release", 120.0),
         )
 
+    report_progress("Mid boost...")
     if settings.get("mid_boost_enabled"):
         processed = midrange_boost(processed, sr, gain_db=settings.get("mid_boost_gain", 3.0))
 
+    report_progress("Presence boost...")
     if settings.get("presence_boost_enabled"):
         processed = presence_boost(processed, sr, gain_db=settings.get("presence_boost_gain", 0.0))
 
+    report_progress("De-esser...")
     if settings.get("de_esser_enabled"):
         processed = de_esser(processed, sr, intensity=settings.get("de_esser_intensity", 0.25))
 
+    report_progress("Notch filter...")
     if settings.get("notch_enabled"):
         processed = notch_filter(
             processed,
@@ -372,6 +484,7 @@ def process_chain(audio, sr, settings):
             q=settings.get("notch_q", 20.0),
         )
 
+    report_progress("High cut...")
     if settings.get("high_cut_enabled"):
         processed = high_frequency_smoothing(
             processed,
@@ -380,9 +493,11 @@ def process_chain(audio, sr, settings):
             wet=settings.get("high_cut_mix", 0.35),
         )
 
+    report_progress("High shelf...")
     if settings.get("high_shelf_enabled"):
         processed = high_shelf_boost(processed, sr, gain_db=settings.get("high_shelf_gain", 0.0))
 
+    report_progress("Compression...")
     if settings.get("compression_enabled"):
         processed = compress_audio(
             processed,
@@ -394,15 +509,19 @@ def process_chain(audio, sr, settings):
             makeup_db=settings.get("compression_makeup", 0.0),
         )
 
+    report_progress("Saturation...")
     if settings.get("saturation_enabled"):
         processed = soft_saturation(processed, amount=settings.get("saturation_amount", 0.0))
 
+    report_progress("Stereo width...")
     if settings.get("stereo_width_enabled"):
         processed = stereo_widen(processed, sr, amount=settings.get("stereo_width_amount", 0.3))
 
+    report_progress("Stereo balance...")
     if settings.get("stereo_balance_enabled"):
         processed = stereo_balance(processed, amount=settings.get("stereo_balance", 0.0))
 
+    report_progress("Reverb...")
     if settings.get("reverb_enabled"):
         processed = add_reverb(
             processed,
@@ -412,7 +531,9 @@ def process_chain(audio, sr, settings):
             predelay_ms=settings.get("reverb_predelay", 20.0),
         )
 
+    report_progress("Limiter...")
     if settings.get("limiter_enabled"):
         processed = limiter(processed, ceiling=settings.get("limiter_ceiling", 0.98))
 
+    report_progress("Finalizing...")
     return normalize_audio(processed)
