@@ -5,7 +5,17 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from processing import process_chain
-from utils import INPUT_DIR, OUTPUT_DIR, ensure_directories, load_audio, make_output_path, save_audio
+from utils import (
+    INPUT_DIR,
+    LOG_PATH,
+    OUTPUT_DIR,
+    SUPPORTED_INPUT_EXTENSIONS,
+    append_log,
+    ensure_directories,
+    load_audio,
+    make_output_path,
+    save_audio,
+)
 
 
 class PitchAlignApp:
@@ -337,10 +347,16 @@ class PitchAlignApp:
         return formatted
 
     def select_input_file(self):
+        joined_patterns = " ".join(f"*{suffix}" for suffix in SUPPORTED_INPUT_EXTENSIONS)
         selected = filedialog.askopenfilename(
             title="Select audio file",
             initialdir=INPUT_DIR,
-            filetypes=[("Audio Files", "*.wav *.mp3"), ("WAV Files", "*.wav"), ("MP3 Files", "*.mp3")],
+            filetypes=[
+                ("Audio Files", joined_patterns),
+                ("WAV Files", "*.wav"),
+                ("MP3 Files", "*.mp3"),
+                ("M4A Files", "*.m4a"),
+            ],
         )
         if selected:
             self.input_path_var.set(selected)
@@ -434,6 +450,15 @@ class PitchAlignApp:
         
         # Start elapsed time updater
         self._update_elapsed_time()
+
+        append_log("-" * 72)
+        append_log(f"Run started | input={input_path} | output={output_path} | size_mb={file_size_mb:.2f}")
+        append_log(
+            "Settings | "
+            f"pitch_align={self.pitch_enabled_var.get()} key={self.key_var.get()} scale={self.scale_var.get()} "
+            f"strength={float(self.pitch_strength_var.get()):.3f} mix={float(self.pitch_mix_var.get()):.3f} "
+            f"hard_tune={self.hard_tune_var.get()} log={LOG_PATH}"
+        )
         
         self.worker_thread = threading.Thread(target=self._process_audio, args=(input_path, output_path), daemon=False)
         self.worker_thread.start()
@@ -443,14 +468,20 @@ class PitchAlignApp:
             # Load audio
             self.root.after(0, lambda: self.status_var.set("Loading audio..."))
             self.root.after(0, self.root.update_idletasks)
+            append_log("Stage | Loading audio")
             
             load_start = time.time()
             audio, sr = load_audio(input_path)
             load_time = time.time() - load_start
             duration = len(audio) / sr
             self.processing_timeout_seconds = max(300.0, duration * 4.0 + 120.0)
+            append_log(
+                f"Loaded audio | sample_rate={sr} duration_s={duration:.2f} "
+                f"shape={getattr(audio, 'shape', None)} load_s={load_time:.2f} timeout_s={self.processing_timeout_seconds:.2f}"
+            )
             
             # Processing with progress callback
+            last_stage = {"value": None}
             def on_progress(stage):
                 elapsed = time.time() - self.process_start_time
                 # Dynamic timeout scales with track duration to avoid false timeouts on long files.
@@ -458,26 +489,37 @@ class PitchAlignApp:
                     raise TimeoutError(
                         f"Processing timeout after {elapsed:.1f}s (limit {self.processing_timeout_seconds:.1f}s)"
                     )
+                if stage != last_stage["value"]:
+                    append_log(f"Stage | {stage} | elapsed_s={elapsed:.2f}")
+                    last_stage["value"] = stage
                 status = f"Processing: {stage} ({self._format_time(elapsed)})"
                 self.root.after(0, lambda: self.status_var.set(status))
                 self.root.after(0, self.root.update_idletasks)
             
             self.root.after(0, lambda: self.status_var.set(f"Processing audio... ({duration:.1f}s duration)"))
             self.root.after(0, self.root.update_idletasks)
+            append_log("Stage | Processing audio")
             
             process_start = time.time()
             processed = process_chain(audio, sr, self._collect_settings(), progress_callback=on_progress)
             process_time = time.time() - process_start
+            append_log(f"Processed audio | process_s={process_time:.2f} output_shape={getattr(processed, 'shape', None)}")
             
             # Saving
             self.root.after(0, lambda: self.status_var.set("Saving audio..."))
             self.root.after(0, self.root.update_idletasks)
+            append_log("Stage | Saving audio")
             
             save_start = time.time()
             save_audio(output_path, processed, sr)
             save_time = time.time() - save_start
+            append_log(f"Saved audio | save_s={save_time:.2f} output={output_path}")
             
             total_time = time.time() - self.process_start_time
+            append_log(
+                f"Run complete | total_s={total_time:.2f} load_s={load_time:.2f} "
+                f"process_s={process_time:.2f} save_s={save_time:.2f}"
+            )
             
             self.root.after(0, lambda: self.status_var.set(f"Complete ✓ ({self._format_time(total_time)})"))
             summary = (
@@ -491,9 +533,11 @@ class PitchAlignApp:
             self.root.after(0, lambda: messagebox.showinfo("pitch-align", summary))
         except TimeoutError as e:
             error_text = str(e)
+            append_log(f"Timeout | {error_text}")
             self.root.after(0, lambda: self.status_var.set("Timeout ✗"))
             self.root.after(0, lambda msg=error_text: messagebox.showerror("pitch-align", f"Processing timed out:\n{msg}"))
         except Exception as exc:
+            append_log(f"Error | {type(exc).__name__}: {exc}")
             self.root.after(0, lambda: self.status_var.set("Error ✗"))
             self.root.after(0, lambda: messagebox.showerror("pitch-align", f"Processing failed:\n{str(exc)}"))
         finally:

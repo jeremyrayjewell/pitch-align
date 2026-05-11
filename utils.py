@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 import librosa
@@ -8,6 +9,8 @@ import soundfile as sf
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_DIR = BASE_DIR / "input"
 OUTPUT_DIR = BASE_DIR / "output"
+LOG_PATH = OUTPUT_DIR / "pitch-align.log"
+SUPPORTED_INPUT_EXTENSIONS = (".wav", ".mp3", ".m4a")
 
 NOTE_TO_PC = {
     "C": 0,
@@ -47,12 +50,34 @@ def ensure_directories():
     OUTPUT_DIR.mkdir(exist_ok=True)
 
 
+def append_log(message):
+    ensure_directories()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with LOG_PATH.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"[{timestamp}] {message}\n")
+
+
 def load_audio(path):
-    audio, sr = librosa.load(path, sr=None, mono=False)
-    if audio.ndim == 1:
-        audio = audio[:, np.newaxis]
-    else:
-        audio = audio.T
+    suffix = Path(path).suffix.lower()
+
+    try:
+        audio, sr = sf.read(path, always_2d=True, dtype="float32")
+    except Exception as exc:
+        try:
+            audio, sr = librosa.load(path, sr=None, mono=False)
+        except Exception as fallback_exc:
+            if suffix == ".m4a":
+                raise RuntimeError(
+                    "Could not decode the .m4a file. Install an AAC-capable backend such as FFmpeg and try again."
+                ) from fallback_exc
+            raise fallback_exc from exc
+
+        if audio.ndim == 1:
+            audio = audio[:, np.newaxis]
+        else:
+            audio = audio.T
+        return audio.astype(np.float32), sr
+
     return audio.astype(np.float32), sr
 
 

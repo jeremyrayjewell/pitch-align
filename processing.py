@@ -1,9 +1,15 @@
+import time
+
 import librosa
 import numpy as np
 from scipy import signal
 from scipy.ndimage import uniform_filter1d
 
 from utils import NOTE_TO_PC, SCALE_INTERVALS, ensure_stereo, normalize_audio, to_mono
+
+
+FMIN_HZ = 65.40639
+FMAX_HZ = 2093.00452
 
 
 def _apply_sos(audio, sos):
@@ -196,14 +202,24 @@ def _scale_pitch_classes(key, scale):
     return (root + SCALE_INTERVALS[scale]) % 12
 
 
-def _nearest_scale_midi(midi_value, scale_pcs):
-    octave = int(np.floor(midi_value / 12.0))
-    candidates = []
-    for octave_offset in (-1, 0, 1):
-        base = (octave + octave_offset) * 12
-        candidates.extend((scale_pcs + base).tolist())
-    candidates = np.array(candidates, dtype=np.float32)
-    return candidates[np.argmin(np.abs(candidates - midi_value))]
+def _hz_to_midi(frequencies):
+    frequencies = np.asarray(frequencies, dtype=np.float32)
+    midi = np.full(frequencies.shape, np.nan, dtype=np.float32)
+    valid = frequencies > 0
+    midi[valid] = 69.0 + 12.0 * np.log2(frequencies[valid] / 440.0)
+    return midi
+
+
+def _nearest_scale_midi_values(midi_values, scale_pcs):
+    if len(midi_values) == 0:
+        return midi_values.astype(np.float32)
+
+    octaves = np.floor(midi_values / 12.0).astype(np.int32)
+    octave_bases = ((octaves[:, np.newaxis] + np.array([-1, 0, 1], dtype=np.int32)) * 12).astype(np.float32)
+    candidates = octave_bases[:, :, np.newaxis] + scale_pcs[np.newaxis, np.newaxis, :].astype(np.float32)
+    candidates = candidates.reshape(len(midi_values), -1)
+    nearest = np.argmin(np.abs(candidates - midi_values[:, np.newaxis]), axis=1)
+    return candidates[np.arange(len(midi_values)), nearest].astype(np.float32)
 
 
 def _smooth_pitch_track(values, window=7):
@@ -220,7 +236,10 @@ def _resample_to_length(samples, target_length, rate):
     if target_length <= 1 or len(samples) <= 1 or np.isclose(rate, 1.0, atol=1e-4):
         return samples[:target_length]
 
-    shifted = librosa.resample(samples, orig_sr=1.0, target_sr=float(rate), res_type="soxr_hq")
+    shifted_length = max(1, int(round(len(samples) * rate)))
+    source_positions = np.arange(len(samples), dtype=np.float32)
+    target_positions = np.linspace(0.0, len(samples) - 1, num=shifted_length, dtype=np.float32)
+    shifted = np.interp(target_positions, source_positions, samples).astype(np.float32)
     if len(shifted) >= target_length:
         start = max(0, (len(shifted) - target_length) // 2)
         return shifted[start : start + target_length]
@@ -229,6 +248,15 @@ def _resample_to_length(samples, target_length, rate):
     pad_before = pad_total // 2
     pad_after = pad_total - pad_before
     return np.pad(shifted, (pad_before, pad_after), mode="edge")
+
+
+def _resample_mono(samples, target_length):
+    if target_length <= 1 or len(samples) <= 1 or target_length == len(samples):
+        return samples[:target_length].astype(np.float32)
+
+    source_positions = np.arange(len(samples), dtype=np.float32)
+    target_positions = np.linspace(0.0, len(samples) - 1, num=target_length, dtype=np.float32)
+    return np.interp(target_positions, source_positions, samples).astype(np.float32)
 
 
 def _pitch_shift_frame(frame, semitone_shift):
@@ -240,6 +268,37 @@ def _pitch_shift_frame(frame, semitone_shift):
     for channel in range(frame.shape[1]):
         shifted[:, channel] = _resample_to_length(frame[:, channel], frame.shape[0], rate)
     return shifted
+
+
+def _estimate_pitch_track(mono, sr, frame_length, hop_length, fmin, fmax):
+    if len(mono) < frame_length:
+        return np.array([], dtype=np.float32), np.array([], dtype=bool), np.array([], dtype=np.float32)
+
+    frames = np.lib.stride_tricks.sliding_window_view(mono, frame_length)[::hop_length]
+    if len(frames) == 0:
+        return np.array([], dtype=np.float32), np.array([], dtype=bool), np.array([], dtype=np.float32)
+
+    window = np.hanning(frame_length).astype(np.float32)
+    spectra = np.fft.rfft(frames * window[np.newaxis, :], axis=1)
+    magnitudes = np.abs(spectra).astype(np.float32)
+    freqs = np.fft.rfftfreq(frame_length, d=1.0 / sr)
+
+    valid_bins = np.flatnonzero((freqs >= fmin) & (freqs <= fmax))
+    if len(valid_bins) == 0:
+        empty = np.zeros(len(frames), dtype=np.float32)
+        return empty, np.zeros(len(frames), dtype=bool), empty
+
+    band_magnitudes = magnitudes[:, valid_bins]
+    peak_indices = np.argmax(band_magnitudes, axis=1)
+    peak_bins = valid_bins[peak_indices]
+    peak_values = band_magnitudes[np.arange(len(frames)), peak_indices]
+    mean_values = np.mean(band_magnitudes, axis=1) + 1e-6
+    voiced_strength = np.clip((peak_values / mean_values - 1.0) / 4.0, 0.0, 1.0).astype(np.float32)
+    voiced_flag = voiced_strength > 0.08
+
+    f0 = freqs[peak_bins].astype(np.float32)
+    f0 = np.where(voiced_flag, f0, np.nan).astype(np.float32)
+    return f0, voiced_flag, voiced_strength
 
 
 def pitch_align(
@@ -255,56 +314,66 @@ def pitch_align(
 ):
     stereo_audio = ensure_stereo(audio).astype(np.float32)
     mono = to_mono(stereo_audio)
-    
-    # Skip pitch alignment for very short files
+
     if len(mono) < 4096:
         if progress_callback:
             progress_callback("Skipping pitch alignment (file too short)")
         return stereo_audio if audio.ndim > 1 else audio.astype(np.float32)
 
-    # Check for very long files and skip if requested
     duration = len(mono) / sr
-    if skip_long_files and duration > 60:  # More than 1 minute
+    if skip_long_files and duration > 60:
         if progress_callback:
             progress_callback(f"Skipping pitch alignment (long file: {duration:.1f}s)")
         return stereo_audio if audio.ndim > 1 else audio.astype(np.float32)
-    elif duration > 60:  # More than 1 minute
-        if progress_callback:
-            progress_callback(f"Warning: Long file ({duration:.1f}s) - pitch detection may be slow")
+    if duration > 60 and progress_callback:
+        progress_callback(f"Warning: Long file ({duration:.1f}s) - pitch detection may be slow")
 
     frame_length = 2048
-    # Pitch detection cost scales heavily with the number of analysis frames.
-    # For longer audio, increase hop_length to reduce frames and make the GUI less "stuck".
     hop_length = 256
-    if duration > 40.0:
+    if duration > 90.0:
+        hop_length = 2048
+    elif duration > 40.0:
         hop_length = 1024
     elif duration > 20.0:
         hop_length = 512
+
     scale_pcs = _scale_pitch_classes(key, scale)
+    synthesis_total_frames = 1 + max(0, (len(mono) - frame_length) // hop_length)
+
+    analysis_sr = min(sr, 16000)
+    analysis_mono = mono
+    analysis_frame_length = frame_length
+    analysis_hop_length = hop_length
+    if sr > analysis_sr:
+        analysis_length = max(1, int(round(len(mono) * analysis_sr / sr)))
+        analysis_mono = _resample_mono(mono, analysis_length)
+        frame_scale = analysis_sr / sr
+        analysis_frame_length = max(1024, int(round(frame_length * frame_scale)))
+        analysis_hop_length = max(128, int(round(hop_length * frame_scale)))
+
+    analysis_method = "fft"
 
     if progress_callback:
         expected_frames = 0
-        if len(mono) >= frame_length:
-            expected_frames = 1 + (len(mono) - frame_length) // hop_length
+        if len(analysis_mono) >= analysis_frame_length:
+            expected_frames = 1 + max(0, (len(analysis_mono) - analysis_frame_length) // analysis_hop_length)
         progress_callback(
-            "Starting pitch analysis (pyin)... "
-            f"duration={duration:.1f}s sr={sr} frame_length={frame_length} hop_length={hop_length} frames≈{expected_frames}"
+            f"Starting pitch analysis ({analysis_method})... "
+            f"duration={duration:.1f}s analysis_sr={analysis_sr} "
+            f"frame_length={analysis_frame_length} hop_length={analysis_hop_length} frames~{expected_frames}"
         )
 
-    # Add progress updates during the potentially long pyin operation
-    import time
     pyin_start = time.time()
-    
-    f0, voiced_flag, voiced_prob = librosa.pyin(
-        mono,
-        fmin=librosa.note_to_hz("C2"),
-        fmax=librosa.note_to_hz("C7"),
-        sr=sr,
-        frame_length=frame_length,
-        hop_length=hop_length,
+    f0, voiced_flag, voiced_prob = _estimate_pitch_track(
+        analysis_mono,
+        analysis_sr,
+        analysis_frame_length,
+        analysis_hop_length,
+        FMIN_HZ,
+        FMAX_HZ,
     )
-    
     pyin_time = time.time() - pyin_start
+
     if progress_callback:
         total_frames = 0 if f0 is None else len(f0)
         if voiced_flag is not None:
@@ -313,7 +382,7 @@ def pitch_align(
             voiced_frames = 0 if f0 is None else int(np.sum(np.isfinite(f0)))
         voiced_pct = (100.0 * voiced_frames / total_frames) if total_frames else 0.0
         progress_callback(
-            f"Pitch analysis complete ({pyin_time:.1f}s) — voiced {voiced_frames}/{total_frames} ({voiced_pct:.1f}%)"
+            f"Pitch analysis complete ({pyin_time:.1f}s) - voiced {voiced_frames}/{total_frames} ({voiced_pct:.1f}%)"
         )
 
     if f0 is None or np.all(~np.isfinite(f0)):
@@ -324,7 +393,7 @@ def pitch_align(
     if progress_callback:
         progress_callback("Converting to MIDI...")
 
-    midi = librosa.hz_to_midi(f0)
+    midi = _hz_to_midi(f0)
     voiced = np.isfinite(midi)
     if voiced_flag is not None:
         voiced &= voiced_flag.astype(bool)
@@ -337,18 +406,13 @@ def pitch_align(
         progress_callback("Mapping to scale...")
 
     target_midi = np.copy(midi)
-    target_midi[voiced] = np.array(
-        [_nearest_scale_midi(midi_value, scale_pcs) for midi_value in midi[voiced]],
-        dtype=np.float32,
-    )
+    target_midi[voiced] = _nearest_scale_midi_values(midi[voiced].astype(np.float32), scale_pcs)
 
     semitone_shift = np.zeros_like(target_midi, dtype=np.float32)
     semitone_shift[voiced] = target_midi[voiced] - midi[voiced]
     semitone_shift = np.clip(semitone_shift, -6.0, 6.0)
 
     if hard_tune:
-        # Hard tune intentionally pushes notes strongly to the nearest scale pitch.
-        # Keep smoothing minimal so correction remains obvious and snappy.
         effective_strength = max(float(np.clip(strength, 0.0, 1.0)), 0.98)
         semitone_shift[voiced] *= effective_strength
         semitone_shift[voiced] = _smooth_pitch_track(semitone_shift[voiced], window=3)
@@ -368,8 +432,33 @@ def pitch_align(
         voiced_strength = np.where(voiced, voiced_prob.astype(np.float32), 0.0)
         voiced_strength = np.clip(voiced_strength, 0.0, 1.0)
     if hard_tune:
-        # Avoid over-attenuating correction on weakly voiced frames.
         voiced_strength = np.where(voiced, np.maximum(voiced_strength, 0.85), 0.0)
+
+    if len(semitone_shift) != synthesis_total_frames and synthesis_total_frames > 0:
+        if len(semitone_shift) == 1:
+            semitone_shift = np.full(synthesis_total_frames, float(semitone_shift[0]), dtype=np.float32)
+            voiced_strength = np.full(synthesis_total_frames, float(voiced_strength[0]), dtype=np.float32)
+        else:
+            analysis_centers = (
+                np.arange(len(semitone_shift), dtype=np.float32) * analysis_hop_length + analysis_frame_length / 2.0
+            ) / float(analysis_sr)
+            synthesis_centers = (
+                np.arange(synthesis_total_frames, dtype=np.float32) * hop_length + frame_length / 2.0
+            ) / float(sr)
+            semitone_shift = np.interp(
+                synthesis_centers,
+                analysis_centers,
+                semitone_shift.astype(np.float32),
+                left=float(semitone_shift[0]),
+                right=float(semitone_shift[-1]),
+            ).astype(np.float32)
+            voiced_strength = np.interp(
+                synthesis_centers,
+                analysis_centers,
+                voiced_strength.astype(np.float32),
+                left=float(voiced_strength[0]),
+                right=float(voiced_strength[-1]),
+            ).astype(np.float32)
 
     if progress_callback:
         progress_callback("Preparing audio frames...")
@@ -381,9 +470,8 @@ def pitch_align(
 
     total_frames = len(semitone_shift)
     frame_start_time = time.time()
-    
+
     for frame_idx, shift in enumerate(semitone_shift):
-        # Update progress every 50 frames (more frequent updates)
         if frame_idx % 50 == 0 and progress_callback:
             progress = int((frame_idx / total_frames) * 100)
             elapsed = time.time() - frame_start_time
@@ -398,9 +486,13 @@ def pitch_align(
 
         frame = padded[start:end]
         voiced_amount = float(voiced_strength[frame_idx]) if frame_idx < len(voiced_strength) else 0.0
-        corrected = _pitch_shift_frame(frame, float(shift))
-        blend = voiced_amount * mix * analysis_window
-        mixed = frame * (1.0 - blend[:, np.newaxis]) + corrected * blend[:, np.newaxis]
+        blend_amount = voiced_amount * mix
+        if blend_amount <= 1e-4 or abs(float(shift)) < 0.01:
+            mixed = frame
+        else:
+            corrected = _pitch_shift_frame(frame, float(shift))
+            blend = blend_amount * analysis_window
+            mixed = frame * (1.0 - blend[:, np.newaxis]) + corrected * blend[:, np.newaxis]
 
         output[start:end] += mixed * analysis_window[:, np.newaxis]
         weights[start:end] += analysis_window

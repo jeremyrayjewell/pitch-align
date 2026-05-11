@@ -6,9 +6,9 @@ The app uses a Tkinter GUI and a modular DSP chain built with `librosa`, `numpy`
 
 ## Features
 
-- Load `.wav` and `.mp3` input files
+- Load `.wav`, `.mp3`, and `.m4a` input files
 - Save processed audio as `.wav` in the `output/` folder
-- Detect pitch frame by frame with `librosa.pyin`
+- Detect pitch frame by frame with a lightweight FFT-based tracker
 - Map each detected pitch to the nearest note in a selected key and scale
 - Preserve original duration and timing
 - Keep stereo intact and only widen when requested
@@ -62,6 +62,7 @@ py main.py
 
 1. Launch the app with `python main.py`.
 2. Choose an input `.wav` or `.mp3` file.
+   `.m4a` is also supported.
 3. Choose or accept the suggested output `.wav` path.
 4. Enable `Pitch Align` if you want scale correction.
 5. Select the target key and scale.
@@ -70,6 +71,8 @@ py main.py
 
 The processed file is saved to `output/<originalname>_aligned.wav` unless you choose another output filename inside the `output/` folder.
 
+If `.m4a` loading fails on your machine, install an AAC-capable decoder such as FFmpeg so `librosa` can decode the file.
+
 ## Pitch Alignment
 
 Pitch correction is handled by `pitch_align(audio, sr, key="D", scale="major", strength=0.9, mix=1.0)` in `processing.py`.
@@ -77,7 +80,7 @@ Pitch correction is handled by `pitch_align(audio, sr, key="D", scale="major", s
 The correction flow is:
 
 1. Convert the signal to mono for pitch analysis only.
-2. Detect `f0` over time using `librosa.pyin`.
+2. Detect `f0` over time using a lightweight FFT-based pitch tracker.
 3. Convert detected frequency values to MIDI note numbers.
 4. Map each voiced frame to the nearest valid note in the selected scale.
 5. Compute a per-frame semitone correction amount.
