@@ -83,6 +83,7 @@ The correction flow is:
 2. Detect `f0` over time using a lightweight FFT-based pitch tracker.
 3. Convert detected frequency values to MIDI note numbers.
 4. Map each voiced frame to the nearest valid note in the selected scale.
+   If `Range explorer` is enabled, the target can instead wander to nearby in-scale notes for a less stable, more exploratory melodic result.
 5. Compute a per-frame semitone correction amount.
 6. Smooth the correction curve.
 7. Blend corrected frames back into the original audio without changing tempo.
@@ -95,12 +96,16 @@ The app currently supports:
 
 - `major`
 - `minor`
+- `aeolian major`
+- `aeolian minor`
 - `harmonic minor`
 - `melodic minor`
 - `major pentatonic`
 - `minor pentatonic`
 - `blues`
 - `dorian`
+- `dorian major`
+- `dorian minor`
 - `phrygian`
 - `lydian`
 - `mixolydian`
@@ -138,6 +143,9 @@ Current modules include:
 - `Scale`: scale or mode used for note mapping
 - `Pitch strength`: how strongly frames are pulled toward target notes
 - `Pitch mix`: blend between dry and corrected signal
+- `Hard tune mode`: makes correction more immediate and less smooth
+- `Range explorer`: randomly jumps among nearby valid scale notes instead of always choosing the nearest one
+- `Explorer amount`: controls how far and how often those random in-scale jumps wander
 
 ## DSP Controls Guide
 

@@ -30,12 +30,16 @@ NOTE_TO_PC = {
 SCALE_INTERVALS = {
     "major": np.array([0, 2, 4, 5, 7, 9, 11], dtype=int),
     "minor": np.array([0, 2, 3, 5, 7, 8, 10], dtype=int),
+    "aeolian major": np.array([0, 2, 4, 5, 7, 8, 10], dtype=int),
+    "aeolian minor": np.array([0, 2, 3, 5, 7, 8, 10], dtype=int),
     "harmonic minor": np.array([0, 2, 3, 5, 7, 8, 11], dtype=int),
     "melodic minor": np.array([0, 2, 3, 5, 7, 9, 11], dtype=int),
     "major pentatonic": np.array([0, 2, 4, 7, 9], dtype=int),
     "minor pentatonic": np.array([0, 3, 5, 7, 10], dtype=int),
     "blues": np.array([0, 3, 5, 6, 7, 10], dtype=int),
     "dorian": np.array([0, 2, 3, 5, 7, 9, 10], dtype=int),
+    "dorian major": np.array([0, 2, 4, 5, 7, 9, 10], dtype=int),
+    "dorian minor": np.array([0, 2, 3, 5, 7, 9, 10], dtype=int),
     "phrygian": np.array([0, 1, 3, 5, 7, 8, 10], dtype=int),
     "lydian": np.array([0, 2, 4, 6, 7, 9, 11], dtype=int),
     "mixolydian": np.array([0, 2, 4, 5, 7, 9, 10], dtype=int),
@@ -43,6 +47,8 @@ SCALE_INTERVALS = {
     "whole tone": np.array([0, 2, 4, 6, 8, 10], dtype=int),
     "chromatic": np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], dtype=int),
 }
+
+AVAILABLE_SCALES = list(SCALE_INTERVALS.keys())
 
 
 def ensure_directories():

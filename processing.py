@@ -222,6 +222,48 @@ def _nearest_scale_midi_values(midi_values, scale_pcs):
     return candidates[np.arange(len(midi_values)), nearest].astype(np.float32)
 
 
+def _scale_candidate_matrix(midi_values, scale_pcs):
+    octaves = np.floor(midi_values / 12.0).astype(np.int32)
+    octave_bases = ((octaves[:, np.newaxis] + np.array([-1, 0, 1], dtype=np.int32)) * 12).astype(np.float32)
+    candidates = octave_bases[:, :, np.newaxis] + scale_pcs[np.newaxis, np.newaxis, :].astype(np.float32)
+    candidates = candidates.reshape(len(midi_values), -1)
+    candidates.sort(axis=1)
+    return candidates.astype(np.float32)
+
+
+def _range_explorer_midi_values(midi_values, scale_pcs, exploration=0.35):
+    if len(midi_values) == 0:
+        return midi_values.astype(np.float32)
+
+    candidates = _scale_candidate_matrix(midi_values, scale_pcs)
+    nearest_indices = np.argmin(np.abs(candidates - midi_values[:, np.newaxis]), axis=1)
+    explored = candidates[np.arange(len(midi_values)), nearest_indices].astype(np.float32)
+
+    exploration = float(np.clip(exploration, 0.0, 1.0))
+    if exploration <= 1e-4:
+        return explored
+
+    rng = np.random.default_rng()
+    max_step_span = max(1, int(round(1.0 + exploration * 3.0)))
+    segment_min = max(1, int(round(8 - exploration * 5.0)))
+    segment_max = max(segment_min, int(round(18 - exploration * 10.0)))
+
+    frame_idx = 0
+    while frame_idx < len(midi_values):
+        segment_length = int(rng.integers(segment_min, segment_max + 1))
+        end_idx = min(len(midi_values), frame_idx + segment_length)
+
+        local_candidates = candidates[frame_idx]
+        local_nearest = int(nearest_indices[frame_idx])
+        lower_bound = max(0, local_nearest - max_step_span)
+        upper_bound = min(len(local_candidates) - 1, local_nearest + max_step_span)
+        chosen_index = int(rng.integers(lower_bound, upper_bound + 1))
+        explored[frame_idx:end_idx] = local_candidates[chosen_index]
+        frame_idx = end_idx
+
+    return explored
+
+
 def _smooth_pitch_track(values, window=7):
     if len(values) == 0:
         return values
@@ -311,6 +353,8 @@ def pitch_align(
     skip_long_files=False,
     progress_callback=None,
     hard_tune=False,
+    range_explorer=False,
+    range_explorer_amount=0.35,
 ):
     stereo_audio = ensure_stereo(audio).astype(np.float32)
     mono = to_mono(stereo_audio)
@@ -406,7 +450,17 @@ def pitch_align(
         progress_callback("Mapping to scale...")
 
     target_midi = np.copy(midi)
-    target_midi[voiced] = _nearest_scale_midi_values(midi[voiced].astype(np.float32), scale_pcs)
+    voiced_midi = midi[voiced].astype(np.float32)
+    if range_explorer:
+        if progress_callback:
+            progress_callback("Exploring scale range...")
+        target_midi[voiced] = _range_explorer_midi_values(
+            voiced_midi,
+            scale_pcs,
+            exploration=range_explorer_amount,
+        )
+    else:
+        target_midi[voiced] = _nearest_scale_midi_values(voiced_midi, scale_pcs)
 
     semitone_shift = np.zeros_like(target_midi, dtype=np.float32)
     semitone_shift[voiced] = target_midi[voiced] - midi[voiced]
@@ -532,6 +586,8 @@ def process_chain(audio, sr, settings, progress_callback=None):
             skip_long_files=settings.get("skip_long_files", False),
             progress_callback=progress_callback,
             hard_tune=settings.get("hard_tune", False),
+            range_explorer=settings.get("range_explorer", False),
+            range_explorer_amount=settings.get("range_explorer_amount", 0.35),
         )
 
     report_progress("DC removal...")

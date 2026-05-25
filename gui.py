@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from processing import process_chain
 from utils import (
+    AVAILABLE_SCALES,
     INPUT_DIR,
     LOG_PATH,
     OUTPUT_DIR,
@@ -47,6 +48,8 @@ class PitchAlignApp:
         self.pitch_strength_var = tk.DoubleVar(value=0.9)
         self.pitch_mix_var = tk.DoubleVar(value=1.0)
         self.hard_tune_var = tk.BooleanVar(value=False)
+        self.range_explorer_var = tk.BooleanVar(value=False)
+        self.range_explorer_amount_var = tk.DoubleVar(value=0.35)
 
         self.dc_remove_enabled_var = tk.BooleanVar(value=True)
         self.highpass_enabled_var = tk.BooleanVar(value=True)
@@ -195,22 +198,7 @@ class PitchAlignApp:
         ttk.Combobox(
             frame,
             textvariable=self.scale_var,
-            values=[
-                "major",
-                "minor",
-                "harmonic minor",
-                "melodic minor",
-                "major pentatonic",
-                "minor pentatonic",
-                "blues",
-                "dorian",
-                "phrygian",
-                "lydian",
-                "mixolydian",
-                "locrian",
-                "whole tone",
-                "chromatic",
-            ],
+            values=AVAILABLE_SCALES,
             state="readonly",
             width=18,
         ).grid(row=2, column=3, sticky="w", padx=(8, 0))
@@ -220,6 +208,10 @@ class PitchAlignApp:
         ttk.Checkbutton(frame, text="Hard tune mode", variable=self.hard_tune_var).grid(
             row=5, column=0, sticky="w", pady=(8, 0)
         )
+        ttk.Checkbutton(frame, text="Range explorer", variable=self.range_explorer_var).grid(
+            row=6, column=0, sticky="w", pady=(8, 0)
+        )
+        self._slider_row(frame, 7, "Explorer amount", self.range_explorer_amount_var, 0.0, 1.0, "Wander")
 
         frame.columnconfigure(4, weight=1)
 
@@ -382,6 +374,8 @@ class PitchAlignApp:
             "pitch_strength": float(self.pitch_strength_var.get()),
             "pitch_mix": float(self.pitch_mix_var.get()),
             "hard_tune": self.hard_tune_var.get(),
+            "range_explorer": self.range_explorer_var.get(),
+            "range_explorer_amount": float(self.range_explorer_amount_var.get()),
             "dc_remove_enabled": self.dc_remove_enabled_var.get(),
             "highpass_enabled": self.highpass_enabled_var.get(),
             "highpass_cutoff": float(self.highpass_cutoff_var.get()),
@@ -457,7 +451,8 @@ class PitchAlignApp:
             "Settings | "
             f"pitch_align={self.pitch_enabled_var.get()} key={self.key_var.get()} scale={self.scale_var.get()} "
             f"strength={float(self.pitch_strength_var.get()):.3f} mix={float(self.pitch_mix_var.get()):.3f} "
-            f"hard_tune={self.hard_tune_var.get()} log={LOG_PATH}"
+            f"hard_tune={self.hard_tune_var.get()} range_explorer={self.range_explorer_var.get()} "
+            f"explorer_amount={float(self.range_explorer_amount_var.get()):.3f} log={LOG_PATH}"
         )
         
         self.worker_thread = threading.Thread(target=self._process_audio, args=(input_path, output_path), daemon=False)
