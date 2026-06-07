@@ -4,7 +4,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from processing import process_chain
+from processing import ProcessingCancelled, process_chain
 from utils import (
     AVAILABLE_SCALES,
     INPUT_DIR,
@@ -31,6 +31,7 @@ class PitchAlignApp:
         self.worker_thread = None
         self.process_button = None
         self.cancel_button = None
+        self.cancel_event = None
         self.status_var = tk.StringVar(value="Idle")
         self.input_path_var = tk.StringVar()
         self.output_path_var = tk.StringVar()
@@ -50,6 +51,7 @@ class PitchAlignApp:
         self.hard_tune_var = tk.BooleanVar(value=False)
         self.range_explorer_var = tk.BooleanVar(value=False)
         self.range_explorer_amount_var = tk.DoubleVar(value=0.35)
+        self.range_explorer_seed_var = tk.StringVar()
 
         self.dc_remove_enabled_var = tk.BooleanVar(value=True)
         self.highpass_enabled_var = tk.BooleanVar(value=True)
@@ -212,6 +214,10 @@ class PitchAlignApp:
             row=6, column=0, sticky="w", pady=(8, 0)
         )
         self._slider_row(frame, 7, "Explorer amount", self.range_explorer_amount_var, 0.0, 1.0, "Wander")
+        ttk.Label(frame, text="Explorer seed").grid(row=8, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.range_explorer_seed_var, width=16).grid(
+            row=8, column=1, sticky="w", padx=(8, 18), pady=(8, 0)
+        )
 
         frame.columnconfigure(4, weight=1)
 
@@ -366,6 +372,8 @@ class PitchAlignApp:
             self.output_path_var.set(str(make_output_path(source_path, selected)))
 
     def _collect_settings(self):
+        range_explorer_seed_text = self.range_explorer_seed_var.get().strip()
+        range_explorer_seed = None if not range_explorer_seed_text else int(range_explorer_seed_text)
         return {
             "pitch_align_enabled": self.pitch_enabled_var.get(),
             "skip_long_files": self.skip_long_files_var.get(),
@@ -376,6 +384,7 @@ class PitchAlignApp:
             "hard_tune": self.hard_tune_var.get(),
             "range_explorer": self.range_explorer_var.get(),
             "range_explorer_amount": float(self.range_explorer_amount_var.get()),
+            "range_explorer_seed": range_explorer_seed,
             "dc_remove_enabled": self.dc_remove_enabled_var.get(),
             "highpass_enabled": self.highpass_enabled_var.get(),
             "highpass_cutoff": float(self.highpass_cutoff_var.get()),
@@ -428,6 +437,18 @@ class PitchAlignApp:
             self.status_var.set("Error")
             return
 
+        range_explorer_seed_text = self.range_explorer_seed_var.get().strip()
+        if range_explorer_seed_text:
+            try:
+                int(range_explorer_seed_text)
+            except ValueError:
+                messagebox.showerror(
+                    "pitch-align",
+                    "Explorer seed must be empty or a whole number.",
+                )
+                self.status_var.set("Error")
+                return
+
         output_path = make_output_path(input_path, self.output_path_var.get().strip() or None)
         self.output_path_var.set(str(output_path))
 
@@ -437,6 +458,7 @@ class PitchAlignApp:
 
         self.is_processing = True
         self.process_start_time = time.time()
+        self.cancel_event = threading.Event()
         self.process_button.config(state="disabled")
         self.cancel_button.config(state="normal")
         self.status_var.set(f"Loading audio... ({file_size_mb:.1f} MB)")
@@ -452,7 +474,8 @@ class PitchAlignApp:
             f"pitch_align={self.pitch_enabled_var.get()} key={self.key_var.get()} scale={self.scale_var.get()} "
             f"strength={float(self.pitch_strength_var.get()):.3f} mix={float(self.pitch_mix_var.get()):.3f} "
             f"hard_tune={self.hard_tune_var.get()} range_explorer={self.range_explorer_var.get()} "
-            f"explorer_amount={float(self.range_explorer_amount_var.get()):.3f} log={LOG_PATH}"
+            f"explorer_amount={float(self.range_explorer_amount_var.get()):.3f} "
+            f"explorer_seed={range_explorer_seed_text or 'random'} log={LOG_PATH}"
         )
         
         self.worker_thread = threading.Thread(target=self._process_audio, args=(input_path, output_path), daemon=False)
@@ -468,6 +491,8 @@ class PitchAlignApp:
             load_start = time.time()
             audio, sr = load_audio(input_path)
             load_time = time.time() - load_start
+            if self.cancel_event and self.cancel_event.is_set():
+                raise ProcessingCancelled("Processing cancelled by user.")
             duration = len(audio) / sr
             self.processing_timeout_seconds = max(300.0, duration * 4.0 + 120.0)
             append_log(
@@ -496,9 +521,18 @@ class PitchAlignApp:
             append_log("Stage | Processing audio")
             
             process_start = time.time()
-            processed = process_chain(audio, sr, self._collect_settings(), progress_callback=on_progress)
+            processed = process_chain(
+                audio,
+                sr,
+                self._collect_settings(),
+                progress_callback=on_progress,
+                cancel_event=self.cancel_event,
+            )
             process_time = time.time() - process_start
             append_log(f"Processed audio | process_s={process_time:.2f} output_shape={getattr(processed, 'shape', None)}")
+
+            if self.cancel_event and self.cancel_event.is_set():
+                raise ProcessingCancelled("Processing cancelled by user.")
             
             # Saving
             self.root.after(0, lambda: self.status_var.set("Saving audio..."))
@@ -526,6 +560,9 @@ class PitchAlignApp:
                 f"Output: {output_path}"
             )
             self.root.after(0, lambda: messagebox.showinfo("pitch-align", summary))
+        except ProcessingCancelled as exc:
+            append_log(f"Cancelled | {exc}")
+            self.root.after(0, lambda: self.status_var.set("Cancelled"))
         except TimeoutError as e:
             error_text = str(e)
             append_log(f"Timeout | {error_text}")
@@ -540,10 +577,10 @@ class PitchAlignApp:
 
     def cancel_processing(self):
         if self.is_processing and self.worker_thread:
+            if self.cancel_event:
+                self.cancel_event.set()
             self.status_var.set("Cancelling...")
             self.cancel_button.config(state="disabled")
-            # Note: We can't actually stop the thread, but we can update the UI
-            # The thread will finish on its own, but we'll show cancelled status
 
     def _finish_processing(self):
         # Cancel the timer
@@ -552,6 +589,7 @@ class PitchAlignApp:
             self.update_timer_id = None
         
         self.is_processing = False
+        self.cancel_event = None
         self.process_button.config(state="normal")
         self.cancel_button.config(state="disabled")
         if self.worker_thread:

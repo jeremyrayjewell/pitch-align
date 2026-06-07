@@ -12,6 +12,15 @@ FMIN_HZ = 65.40639
 FMAX_HZ = 2093.00452
 
 
+class ProcessingCancelled(Exception):
+    pass
+
+
+def _check_cancel(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise ProcessingCancelled("Processing cancelled by user.")
+
+
 def _apply_sos(audio, sos):
     processed = np.zeros_like(audio, dtype=np.float32)
     for channel in range(audio.shape[1]):
@@ -231,7 +240,7 @@ def _scale_candidate_matrix(midi_values, scale_pcs):
     return candidates.astype(np.float32)
 
 
-def _range_explorer_midi_values(midi_values, scale_pcs, exploration=0.35):
+def _range_explorer_midi_values(midi_values, scale_pcs, exploration=0.35, seed=None):
     if len(midi_values) == 0:
         return midi_values.astype(np.float32)
 
@@ -243,7 +252,7 @@ def _range_explorer_midi_values(midi_values, scale_pcs, exploration=0.35):
     if exploration <= 1e-4:
         return explored
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
     max_step_span = max(1, int(round(1.0 + exploration * 3.0)))
     segment_min = max(1, int(round(8 - exploration * 5.0)))
     segment_max = max(segment_min, int(round(18 - exploration * 10.0)))
@@ -355,7 +364,10 @@ def pitch_align(
     hard_tune=False,
     range_explorer=False,
     range_explorer_amount=0.35,
+    range_explorer_seed=None,
+    cancel_event=None,
 ):
+    _check_cancel(cancel_event)
     stereo_audio = ensure_stereo(audio).astype(np.float32)
     mono = to_mono(stereo_audio)
 
@@ -408,6 +420,7 @@ def pitch_align(
         )
 
     pyin_start = time.time()
+    _check_cancel(cancel_event)
     f0, voiced_flag, voiced_prob = _estimate_pitch_track(
         analysis_mono,
         analysis_sr,
@@ -437,6 +450,7 @@ def pitch_align(
     if progress_callback:
         progress_callback("Converting to MIDI...")
 
+    _check_cancel(cancel_event)
     midi = _hz_to_midi(f0)
     voiced = np.isfinite(midi)
     if voiced_flag is not None:
@@ -449,6 +463,7 @@ def pitch_align(
     if progress_callback:
         progress_callback("Mapping to scale...")
 
+    _check_cancel(cancel_event)
     target_midi = np.copy(midi)
     voiced_midi = midi[voiced].astype(np.float32)
     if range_explorer:
@@ -458,6 +473,7 @@ def pitch_align(
             voiced_midi,
             scale_pcs,
             exploration=range_explorer_amount,
+            seed=range_explorer_seed,
         )
     else:
         target_midi[voiced] = _nearest_scale_midi_values(voiced_midi, scale_pcs)
@@ -517,6 +533,7 @@ def pitch_align(
     if progress_callback:
         progress_callback("Preparing audio frames...")
 
+    _check_cancel(cancel_event)
     padded = np.pad(stereo_audio, ((frame_length // 2, frame_length // 2), (0, 0)), mode="reflect")
     output = np.zeros((len(padded), stereo_audio.shape[1]), dtype=np.float32)
     weights = np.zeros(len(padded), dtype=np.float32)
@@ -526,6 +543,8 @@ def pitch_align(
     frame_start_time = time.time()
 
     for frame_idx, shift in enumerate(semitone_shift):
+        if frame_idx % 10 == 0:
+            _check_cancel(cancel_event)
         if frame_idx % 50 == 0 and progress_callback:
             progress = int((frame_idx / total_frames) * 100)
             elapsed = time.time() - frame_start_time
@@ -554,6 +573,7 @@ def pitch_align(
     if progress_callback:
         progress_callback("Finalizing pitch correction...")
 
+    _check_cancel(cancel_event)
     silent = weights < 1e-6
     weights[silent] = 1.0
     output /= weights[:, np.newaxis]
@@ -567,10 +587,11 @@ def pitch_align(
     return output
 
 
-def process_chain(audio, sr, settings, progress_callback=None):
+def process_chain(audio, sr, settings, progress_callback=None, cancel_event=None):
     processed = audio.astype(np.float32).copy()
 
     def report_progress(stage):
+        _check_cancel(cancel_event)
         if progress_callback:
             progress_callback(stage)
 
@@ -588,22 +609,28 @@ def process_chain(audio, sr, settings, progress_callback=None):
             hard_tune=settings.get("hard_tune", False),
             range_explorer=settings.get("range_explorer", False),
             range_explorer_amount=settings.get("range_explorer_amount", 0.35),
+            range_explorer_seed=settings.get("range_explorer_seed"),
+            cancel_event=cancel_event,
         )
 
     report_progress("DC removal...")
     if settings.get("dc_remove_enabled"):
+        _check_cancel(cancel_event)
         processed = dc_offset_removal(processed)
 
     report_progress("Highpass filtering...")
     if settings.get("highpass_enabled"):
+        _check_cancel(cancel_event)
         processed = highpass_filter(processed, sr, cutoff=settings.get("highpass_cutoff", 80.0))
 
     report_progress("Low shelf...")
     if settings.get("low_shelf_enabled"):
+        _check_cancel(cancel_event)
         processed = low_shelf_boost(processed, sr, gain_db=settings.get("low_shelf_gain", 0.0))
 
     report_progress("Noise gate...")
     if settings.get("noise_gate_enabled"):
+        _check_cancel(cancel_event)
         processed = noise_gate(
             processed,
             sr,
@@ -613,18 +640,22 @@ def process_chain(audio, sr, settings, progress_callback=None):
 
     report_progress("Mid boost...")
     if settings.get("mid_boost_enabled"):
+        _check_cancel(cancel_event)
         processed = midrange_boost(processed, sr, gain_db=settings.get("mid_boost_gain", 3.0))
 
     report_progress("Presence boost...")
     if settings.get("presence_boost_enabled"):
+        _check_cancel(cancel_event)
         processed = presence_boost(processed, sr, gain_db=settings.get("presence_boost_gain", 0.0))
 
     report_progress("De-esser...")
     if settings.get("de_esser_enabled"):
+        _check_cancel(cancel_event)
         processed = de_esser(processed, sr, intensity=settings.get("de_esser_intensity", 0.25))
 
     report_progress("Notch filter...")
     if settings.get("notch_enabled"):
+        _check_cancel(cancel_event)
         processed = notch_filter(
             processed,
             sr,
@@ -634,6 +665,7 @@ def process_chain(audio, sr, settings, progress_callback=None):
 
     report_progress("High cut...")
     if settings.get("high_cut_enabled"):
+        _check_cancel(cancel_event)
         processed = high_frequency_smoothing(
             processed,
             sr,
@@ -643,10 +675,12 @@ def process_chain(audio, sr, settings, progress_callback=None):
 
     report_progress("High shelf...")
     if settings.get("high_shelf_enabled"):
+        _check_cancel(cancel_event)
         processed = high_shelf_boost(processed, sr, gain_db=settings.get("high_shelf_gain", 0.0))
 
     report_progress("Compression...")
     if settings.get("compression_enabled"):
+        _check_cancel(cancel_event)
         processed = compress_audio(
             processed,
             sr,
@@ -659,18 +693,22 @@ def process_chain(audio, sr, settings, progress_callback=None):
 
     report_progress("Saturation...")
     if settings.get("saturation_enabled"):
+        _check_cancel(cancel_event)
         processed = soft_saturation(processed, amount=settings.get("saturation_amount", 0.0))
 
     report_progress("Stereo width...")
     if settings.get("stereo_width_enabled"):
+        _check_cancel(cancel_event)
         processed = stereo_widen(processed, sr, amount=settings.get("stereo_width_amount", 0.3))
 
     report_progress("Stereo balance...")
     if settings.get("stereo_balance_enabled"):
+        _check_cancel(cancel_event)
         processed = stereo_balance(processed, amount=settings.get("stereo_balance", 0.0))
 
     report_progress("Reverb...")
     if settings.get("reverb_enabled"):
+        _check_cancel(cancel_event)
         processed = add_reverb(
             processed,
             sr,
@@ -681,7 +719,9 @@ def process_chain(audio, sr, settings, progress_callback=None):
 
     report_progress("Limiter...")
     if settings.get("limiter_enabled"):
+        _check_cancel(cancel_event)
         processed = limiter(processed, ceiling=settings.get("limiter_ceiling", 0.98))
 
     report_progress("Finalizing...")
+    _check_cancel(cancel_event)
     return normalize_audio(processed)

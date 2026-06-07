@@ -93,6 +93,20 @@ A quick syntax check:
 python -m compileall main.py gui.py processing.py utils.py
 ```
 
+## Run Tests
+
+Install the development dependencies:
+
+```powershell
+py -m pip install -r requirements-dev.txt
+```
+
+Run the test suite:
+
+```powershell
+python -m pytest
+```
+
 ## Pitch Alignment
 
 Pitch correction is handled by `pitch_align(audio, sr, key="D", scale="major", strength=0.9, mix=1.0)` in `processing.py`.
@@ -103,7 +117,7 @@ The correction flow is:
 2. Detect `f0` over time using a lightweight FFT-based pitch tracker.
 3. Convert detected frequency values to MIDI note numbers.
 4. Map each voiced frame to the nearest valid note in the selected scale.
-   If `Range explorer` is enabled, the target can instead wander to nearby in-scale notes for a less stable, more exploratory melodic result.
+   If `Range explorer` is enabled, the target can instead wander to nearby in-scale notes for a less stable, more exploratory melodic result. An optional seed can be provided to make that wandering repeatable.
 5. Compute a per-frame semitone correction amount.
 6. Smooth the correction curve.
 7. Blend corrected frames back into the original audio without changing tempo.
@@ -168,6 +182,7 @@ Current modules include:
 - `Hard tune mode`: makes correction more immediate and less smooth
 - `Range explorer`: randomly jumps among nearby valid scale notes instead of always choosing the nearest one
 - `Explorer amount`: controls how far and how often those random in-scale jumps wander
+- `Explorer seed`: optional whole-number seed for repeatable `Range explorer` behavior
 
 ## DSP Controls Guide
 
@@ -203,7 +218,7 @@ Current modules include:
 - The current pitch-shifting approach is lightweight and deterministic, but it is not a replacement for a dedicated commercial vocal tuning engine.
 - Output is always written as `.wav`.
 - The app keeps the original sample rate and does not time-stretch the file.
-- The `Cancel` button only updates the UI state; it does not forcibly stop the background processing thread.
+- Cancellation is cooperative, so stopping happens at the next safe processing check rather than instantly.
 - Long files can take noticeably longer to process, especially when pitch alignment is enabled.
 
 ## Main Files

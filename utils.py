@@ -99,11 +99,11 @@ def make_output_path(input_path, output_path=None):
     if candidate.suffix.lower() != ".wav":
         candidate = candidate.with_suffix(".wav")
 
+    if candidate.resolve() == Path(input_path).resolve():
+        return default_path
+
     if candidate.resolve().parent != OUTPUT_DIR.resolve():
         candidate = OUTPUT_DIR / candidate.name
-
-    if candidate.resolve() == Path(input_path).resolve():
-        candidate = default_path
 
     return candidate
 
