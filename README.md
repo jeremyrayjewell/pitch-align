@@ -4,6 +4,8 @@
 
 The app uses a Tkinter GUI and a modular DSP chain built with `librosa`, `numpy`, `scipy`, and `soundfile`.
 
+The pitch-correction stage is experimental. It works best on clean, mostly monophonic material with a clear dominant pitch, such as a single vocal line or lead instrument.
+
 ## Features
 
 - Load `.wav`, `.mp3`, and `.m4a` input files
@@ -32,17 +34,28 @@ pitch-align/
 - Python 3.10 or newer recommended
 - Desktop environment with Tkinter available
 
-Install dependencies:
+## Setup
+
+Create and activate a virtual environment if you want an isolated install:
 
 ```powershell
-pip install librosa numpy scipy soundfile
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+Install runtime dependencies:
+
+```powershell
+pip install -r requirements.txt
 ```
 
 If `pip` points to the wrong Python version, use:
 
 ```powershell
-py -m pip install librosa numpy scipy soundfile
+py -m pip install -r requirements.txt
 ```
+
+On some systems, decoding `.mp3` or `.m4a` files may depend on the audio backends available in your Python environment. If `.m4a` loading fails, install an AAC-capable decoder such as FFmpeg.
 
 ## Running The App
 
@@ -58,11 +71,12 @@ If needed:
 py main.py
 ```
 
+The app opens a Tkinter window where you can choose an input file, select output settings, enable or disable pitch alignment, and run the processing chain.
+
 ## Basic Workflow
 
 1. Launch the app with `python main.py`.
-2. Choose an input `.wav` or `.mp3` file.
-   `.m4a` is also supported.
+2. Choose an input `.wav`, `.mp3`, or `.m4a` file.
 3. Choose or accept the suggested output `.wav` path.
 4. Enable `Pitch Align` if you want scale correction.
 5. Select the target key and scale.
@@ -71,7 +85,13 @@ py main.py
 
 The processed file is saved to `output/<originalname>_aligned.wav` unless you choose another output filename inside the `output/` folder.
 
-If `.m4a` loading fails on your machine, install an AAC-capable decoder such as FFmpeg so `librosa` can decode the file.
+## Development Check
+
+A quick syntax check:
+
+```powershell
+python -m compileall main.py gui.py processing.py utils.py
+```
 
 ## Pitch Alignment
 
@@ -89,6 +109,8 @@ The correction flow is:
 7. Blend corrected frames back into the original audio without changing tempo.
 
 This is not a global pitch shift. Each voiced frame is corrected independently toward the chosen scale.
+
+The current implementation is intentionally lightweight and experimental. It is useful for exploration and simple correction, but it is not a replacement for a dedicated commercial tuning engine.
 
 ## Available Scale Types
 
@@ -173,13 +195,16 @@ Current modules include:
 - `Reverb predelay`: delay before the reverb starts
 - `Limiter ceiling`: maximum output peak before final normalization
 
-## Notes And Limitations
+## Known Limitations
 
-- Pitch detection works best on monophonic or clearly dominant melodic material.
-- Dense chords, noisy recordings, and heavily percussive material may produce less stable correction.
+- Pitch correction is experimental and works best on clean monophonic or clearly dominant melodic material.
+- Dense chords, noisy recordings, breathy vocals, and heavily percussive material may produce unstable or inaccurate correction.
+- Pitch analysis is frame-based and lightweight, so artifacts may be audible on exposed material.
 - The current pitch-shifting approach is lightweight and deterministic, but it is not a replacement for a dedicated commercial vocal tuning engine.
 - Output is always written as `.wav`.
 - The app keeps the original sample rate and does not time-stretch the file.
+- The `Cancel` button only updates the UI state; it does not forcibly stop the background processing thread.
+- Long files can take noticeably longer to process, especially when pitch alignment is enabled.
 
 ## Main Files
 
@@ -188,14 +213,6 @@ Current modules include:
 - `processing.py`: pitch alignment and DSP chain
 - `utils.py`: file paths, audio loading/saving, note and scale definitions
 
-## Development Check
-
-A quick syntax check:
-
-```powershell
-python -m py_compile main.py gui.py processing.py utils.py
-```
-
 ## License
 
-No license file is currently included in this repository.
+This repository is available under the MIT License. See [LICENSE](/d:/git/pitch-align/LICENSE).
