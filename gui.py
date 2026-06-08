@@ -6,13 +6,17 @@ from tkinter import filedialog, messagebox, ttk
 
 from processing import ProcessingCancelled, process_chain
 from utils import (
+    AVAILABLE_PRESETS,
+    AVAILABLE_PROCESSING_MODES,
     AVAILABLE_SCALES,
     INPUT_DIR,
     LOG_PATH,
     OUTPUT_DIR,
+    PROCESSING_MODE_PITCH_DSP,
     SUPPORTED_INPUT_EXTENSIONS,
     append_log,
     ensure_directories,
+    get_preset_settings,
     load_audio,
     make_output_path,
     save_audio,
@@ -35,6 +39,8 @@ class PitchAlignApp:
         self.status_var = tk.StringVar(value="Idle")
         self.input_path_var = tk.StringVar()
         self.output_path_var = tk.StringVar()
+        self.preset_var = tk.StringVar(value="Custom")
+        self.processing_mode_var = tk.StringVar(value=PROCESSING_MODE_PITCH_DSP)
         
         # Timing
         self.process_start_time = None
@@ -93,6 +99,58 @@ class PitchAlignApp:
         self.reverb_predelay_var = tk.DoubleVar(value=20.0)
         self.limiter_enabled_var = tk.BooleanVar(value=True)
         self.limiter_ceiling_var = tk.DoubleVar(value=0.98)
+        self.setting_vars = {
+            "pitch_align_enabled": self.pitch_enabled_var,
+            "skip_long_files": self.skip_long_files_var,
+            "key": self.key_var,
+            "scale": self.scale_var,
+            "pitch_strength": self.pitch_strength_var,
+            "pitch_mix": self.pitch_mix_var,
+            "hard_tune": self.hard_tune_var,
+            "range_explorer": self.range_explorer_var,
+            "range_explorer_amount": self.range_explorer_amount_var,
+            "range_explorer_seed": self.range_explorer_seed_var,
+            "dc_remove_enabled": self.dc_remove_enabled_var,
+            "highpass_enabled": self.highpass_enabled_var,
+            "highpass_cutoff": self.highpass_cutoff_var,
+            "low_shelf_enabled": self.low_shelf_enabled_var,
+            "low_shelf_gain": self.low_shelf_gain_var,
+            "noise_gate_enabled": self.noise_gate_enabled_var,
+            "noise_gate_threshold": self.noise_gate_threshold_var,
+            "noise_gate_release": self.noise_gate_release_var,
+            "mid_boost_enabled": self.mid_boost_enabled_var,
+            "mid_boost_gain": self.mid_boost_gain_var,
+            "presence_boost_enabled": self.presence_boost_enabled_var,
+            "presence_boost_gain": self.presence_boost_gain_var,
+            "de_esser_enabled": self.de_esser_enabled_var,
+            "de_esser_intensity": self.de_esser_intensity_var,
+            "notch_enabled": self.notch_enabled_var,
+            "notch_frequency": self.notch_frequency_var,
+            "notch_q": self.notch_q_var,
+            "high_cut_enabled": self.high_cut_enabled_var,
+            "high_cut_freq": self.high_cut_freq_var,
+            "high_cut_mix": self.high_cut_mix_var,
+            "high_shelf_enabled": self.high_shelf_enabled_var,
+            "high_shelf_gain": self.high_shelf_gain_var,
+            "compression_enabled": self.compression_enabled_var,
+            "compression_intensity": self.compression_intensity_var,
+            "compression_threshold": self.compression_threshold_var,
+            "compression_attack": self.compression_attack_var,
+            "compression_release": self.compression_release_var,
+            "compression_makeup": self.compression_makeup_var,
+            "saturation_enabled": self.saturation_enabled_var,
+            "saturation_amount": self.saturation_amount_var,
+            "stereo_width_enabled": self.stereo_width_enabled_var,
+            "stereo_width_amount": self.stereo_width_amount_var,
+            "stereo_balance_enabled": self.stereo_balance_enabled_var,
+            "stereo_balance": self.stereo_balance_var,
+            "reverb_enabled": self.reverb_enabled_var,
+            "reverb_mix": self.reverb_mix_var,
+            "reverb_decay": self.reverb_decay_var,
+            "reverb_predelay": self.reverb_predelay_var,
+            "limiter_enabled": self.limiter_enabled_var,
+            "limiter_ceiling": self.limiter_ceiling_var,
+        }
 
         self._build_ui()
 
@@ -141,13 +199,33 @@ class PitchAlignApp:
         frame = ttk.LabelFrame(parent, text="File Controls", padding=12)
         frame.pack(fill="x", pady=(0, 12))
 
-        ttk.Label(frame, text="Input file").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.input_path_var, width=88).grid(row=1, column=0, padx=(0, 8), sticky="ew")
-        ttk.Button(frame, text="Browse...", command=self.select_input_file).grid(row=1, column=1, sticky="ew")
+        ttk.Label(frame, text="Preset").grid(row=0, column=0, sticky="w")
+        preset_combo = ttk.Combobox(
+            frame,
+            textvariable=self.preset_var,
+            values=["Custom", *AVAILABLE_PRESETS],
+            state="readonly",
+            width=28,
+        )
+        preset_combo.grid(row=0, column=1, sticky="w", pady=(0, 10))
+        preset_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
-        ttk.Label(frame, text="Output file").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        ttk.Entry(frame, textvariable=self.output_path_var, width=88).grid(row=3, column=0, padx=(0, 8), sticky="ew")
-        ttk.Button(frame, text="Browse...", command=self.select_output_file).grid(row=3, column=1, sticky="ew")
+        ttk.Label(frame, text="Processing mode").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        ttk.Combobox(
+            frame,
+            textvariable=self.processing_mode_var,
+            values=AVAILABLE_PROCESSING_MODES,
+            state="readonly",
+            width=16,
+        ).grid(row=0, column=3, sticky="w", pady=(0, 10), padx=(8, 0))
+
+        ttk.Label(frame, text="Input file").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.input_path_var, width=88).grid(row=2, column=0, padx=(0, 8), sticky="ew")
+        ttk.Button(frame, text="Browse...", command=self.select_input_file).grid(row=2, column=1, sticky="ew")
+
+        ttk.Label(frame, text="Output file").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(frame, textvariable=self.output_path_var, width=88).grid(row=4, column=0, padx=(0, 8), sticky="ew")
+        ttk.Button(frame, text="Browse...", command=self.select_output_file).grid(row=4, column=1, sticky="ew")
 
         frame.columnconfigure(0, weight=1)
 
@@ -371,11 +449,29 @@ class PitchAlignApp:
             source_path = self.input_path_var.get().strip() or (INPUT_DIR / "untitled.wav")
             self.output_path_var.set(str(make_output_path(source_path, selected)))
 
+    def _on_preset_selected(self, _event=None):
+        preset_name = self.preset_var.get()
+        if preset_name == "Custom":
+            return
+        self._apply_preset(preset_name)
+
+    def _apply_preset(self, preset_name):
+        settings = get_preset_settings(preset_name)
+        for key, value in settings.items():
+            variable = self.setting_vars.get(key)
+            if variable is None:
+                continue
+            if key == "range_explorer_seed":
+                variable.set("" if value is None else str(value))
+            else:
+                variable.set(value)
+
     def _collect_settings(self):
         range_explorer_seed_text = self.range_explorer_seed_var.get().strip()
         range_explorer_seed = None if not range_explorer_seed_text else int(range_explorer_seed_text)
         return {
             "pitch_align_enabled": self.pitch_enabled_var.get(),
+            "processing_mode": self.processing_mode_var.get(),
             "skip_long_files": self.skip_long_files_var.get(),
             "key": self.key_var.get(),
             "scale": self.scale_var.get(),
@@ -471,6 +567,7 @@ class PitchAlignApp:
         append_log(f"Run started | input={input_path} | output={output_path} | size_mb={file_size_mb:.2f}")
         append_log(
             "Settings | "
+            f"mode={self.processing_mode_var.get()} "
             f"pitch_align={self.pitch_enabled_var.get()} key={self.key_var.get()} scale={self.scale_var.get()} "
             f"strength={float(self.pitch_strength_var.get()):.3f} mix={float(self.pitch_mix_var.get()):.3f} "
             f"hard_tune={self.hard_tune_var.get()} range_explorer={self.range_explorer_var.get()} "

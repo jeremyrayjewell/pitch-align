@@ -15,6 +15,8 @@ The pitch-correction stage is experimental. It works best on clean, mostly monop
 - Preserve original duration and timing
 - Keep stereo intact and only widen when requested
 - Apply optional DSP stages in a fixed, deterministic order
+- Include built-in presets that apply groups of existing pitch and DSP settings
+- Offer three processing modes: `Pitch + DSP`, `Pitch only`, and `DSP only`
 
 ## Project Structure
 
@@ -80,8 +82,10 @@ The app opens a Tkinter window where you can choose an input file, select output
 3. Choose or accept the suggested output `.wav` path.
 4. Enable `Pitch Align` if you want scale correction.
 5. Select the target key and scale.
-6. Enable any DSP modules you want to use.
-7. Click `Process Audio`.
+6. Optionally choose a built-in preset to quickly apply a group of existing settings.
+7. Choose a processing mode: `Pitch + DSP`, `Pitch only`, or `DSP only`.
+8. Enable or adjust any DSP modules you want to use.
+9. Click `Process Audio`.
 
 The processed file is saved to `output/<originalname>_aligned.wav` unless you choose another output filename inside the `output/` folder.
 
@@ -174,6 +178,7 @@ Current modules include:
 
 ## Pitch Controls
 
+- `Processing mode`: chooses whether the app runs pitch alignment plus DSP, pitch alignment only, or DSP only
 - `Enable pitch align`: turns scale correction on or off
 - `Key`: root note for the target scale
 - `Scale`: scale or mode used for note mapping
@@ -183,6 +188,7 @@ Current modules include:
 - `Range explorer`: randomly jumps among nearby valid scale notes instead of always choosing the nearest one
 - `Explorer amount`: controls how far and how often those random in-scale jumps wander
 - `Explorer seed`: optional whole-number seed for repeatable `Range explorer` behavior
+- `Presets`: built-in starting points that update the existing controls, after which you can still adjust settings manually
 
 ## DSP Controls Guide
 

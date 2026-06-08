@@ -9,6 +9,51 @@ def test_available_scales_matches_scale_definitions():
     assert utils.AVAILABLE_SCALES == list(utils.SCALE_INTERVALS.keys())
 
 
+def test_available_presets_include_expected_names():
+    expected = {
+        "Natural Vocal Align",
+        "Hard Tune",
+        "Subtle Cleanup",
+        "Experimental Range Explorer",
+        "Bright Vocal Polish",
+        "Dark Soft Vocal",
+    }
+    assert expected.issubset(set(utils.AVAILABLE_PRESETS))
+
+
+def test_available_processing_modes_include_expected_names():
+    assert utils.AVAILABLE_PROCESSING_MODES == [
+        "Pitch + DSP",
+        "Pitch only",
+        "DSP only",
+    ]
+
+
+def test_validate_processing_mode_rejects_unknown_value():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unsupported processing mode"):
+        utils.validate_processing_mode("Pitch maybe")
+
+
+def test_get_preset_settings_returns_copy_and_expected_values():
+    preset = utils.get_preset_settings("Experimental Range Explorer")
+    assert preset["range_explorer"] is True
+    assert preset["range_explorer_amount"] > 0.35
+    assert preset["range_explorer_seed"] is None
+
+    preset["range_explorer"] = False
+    fresh = utils.get_preset_settings("Experimental Range Explorer")
+    assert fresh["range_explorer"] is True
+
+
+def test_get_preset_settings_rejects_unknown_preset():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unsupported preset"):
+        utils.get_preset_settings("Imaginary Preset")
+
+
 def test_normalize_audio_leaves_audio_below_peak_unchanged():
     audio = np.array([[0.2, -0.2], [0.5, -0.5]], dtype=np.float32)
 

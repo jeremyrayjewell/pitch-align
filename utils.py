@@ -51,6 +51,163 @@ SCALE_INTERVALS = {
 AVAILABLE_SCALES = list(SCALE_INTERVALS.keys())
 
 
+DEFAULT_PROCESSING_SETTINGS = {
+    "pitch_align_enabled": True,
+    "skip_long_files": False,
+    "key": "D",
+    "scale": "major",
+    "pitch_strength": 0.9,
+    "pitch_mix": 1.0,
+    "hard_tune": False,
+    "range_explorer": False,
+    "range_explorer_amount": 0.35,
+    "range_explorer_seed": None,
+    "dc_remove_enabled": True,
+    "highpass_enabled": True,
+    "highpass_cutoff": 80.0,
+    "low_shelf_enabled": False,
+    "low_shelf_gain": 0.0,
+    "noise_gate_enabled": False,
+    "noise_gate_threshold": -45.0,
+    "noise_gate_release": 120.0,
+    "mid_boost_enabled": True,
+    "mid_boost_gain": 3.0,
+    "presence_boost_enabled": False,
+    "presence_boost_gain": 0.0,
+    "de_esser_enabled": False,
+    "de_esser_intensity": 0.25,
+    "notch_enabled": False,
+    "notch_frequency": 60.0,
+    "notch_q": 20.0,
+    "high_cut_enabled": False,
+    "high_cut_freq": 9000.0,
+    "high_cut_mix": 0.35,
+    "high_shelf_enabled": False,
+    "high_shelf_gain": 0.0,
+    "compression_enabled": False,
+    "compression_intensity": 0.35,
+    "compression_threshold": -18.0,
+    "compression_attack": 12.0,
+    "compression_release": 90.0,
+    "compression_makeup": 0.0,
+    "saturation_enabled": False,
+    "saturation_amount": 0.2,
+    "stereo_width_enabled": False,
+    "stereo_width_amount": 0.3,
+    "stereo_balance_enabled": False,
+    "stereo_balance": 0.0,
+    "reverb_enabled": False,
+    "reverb_mix": 0.12,
+    "reverb_decay": 0.22,
+    "reverb_predelay": 20.0,
+    "limiter_enabled": True,
+    "limiter_ceiling": 0.98,
+}
+
+
+def _preset(**overrides):
+    values = DEFAULT_PROCESSING_SETTINGS.copy()
+    values.update(overrides)
+    return values
+
+
+PRESETS = {
+    "Natural Vocal Align": _preset(),
+    "Hard Tune": _preset(
+        pitch_strength=1.0,
+        pitch_mix=1.0,
+        hard_tune=True,
+        compression_enabled=True,
+        compression_intensity=0.45,
+        compression_threshold=-20.0,
+        presence_boost_enabled=True,
+        presence_boost_gain=2.5,
+        de_esser_enabled=True,
+        de_esser_intensity=0.35,
+    ),
+    "Subtle Cleanup": _preset(
+        pitch_strength=0.45,
+        pitch_mix=0.7,
+        mid_boost_enabled=False,
+        noise_gate_enabled=True,
+        noise_gate_threshold=-52.0,
+        noise_gate_release=150.0,
+        high_cut_enabled=True,
+        high_cut_freq=10000.0,
+        high_cut_mix=0.2,
+        compression_enabled=True,
+        compression_intensity=0.2,
+        compression_threshold=-20.0,
+        limiter_ceiling=0.96,
+    ),
+    "Experimental Range Explorer": _preset(
+        pitch_strength=0.95,
+        pitch_mix=1.0,
+        range_explorer=True,
+        range_explorer_amount=0.75,
+        stereo_width_enabled=True,
+        stereo_width_amount=0.2,
+        reverb_enabled=True,
+        reverb_mix=0.16,
+        reverb_decay=0.35,
+    ),
+    "Bright Vocal Polish": _preset(
+        pitch_strength=0.8,
+        presence_boost_enabled=True,
+        presence_boost_gain=4.0,
+        de_esser_enabled=True,
+        de_esser_intensity=0.35,
+        compression_enabled=True,
+        compression_intensity=0.38,
+        compression_threshold=-20.0,
+        high_shelf_enabled=True,
+        high_shelf_gain=3.5,
+        reverb_enabled=True,
+        reverb_mix=0.1,
+        reverb_decay=0.2,
+    ),
+    "Dark Soft Vocal": _preset(
+        pitch_strength=0.75,
+        mid_boost_gain=1.5,
+        high_cut_enabled=True,
+        high_cut_freq=7000.0,
+        high_cut_mix=0.55,
+        high_shelf_enabled=True,
+        high_shelf_gain=-2.5,
+        compression_enabled=True,
+        compression_intensity=0.28,
+        compression_threshold=-19.0,
+        saturation_enabled=True,
+        saturation_amount=0.1,
+        reverb_enabled=True,
+        reverb_mix=0.14,
+        reverb_decay=0.3,
+    ),
+}
+
+AVAILABLE_PRESETS = list(PRESETS.keys())
+PROCESSING_MODE_PITCH_DSP = "Pitch + DSP"
+PROCESSING_MODE_PITCH_ONLY = "Pitch only"
+PROCESSING_MODE_DSP_ONLY = "DSP only"
+AVAILABLE_PROCESSING_MODES = [
+    PROCESSING_MODE_PITCH_DSP,
+    PROCESSING_MODE_PITCH_ONLY,
+    PROCESSING_MODE_DSP_ONLY,
+]
+
+
+def get_preset_settings(name):
+    if name not in PRESETS:
+        raise ValueError(f"Unsupported preset: {name}")
+    return PRESETS[name].copy()
+
+
+def validate_processing_mode(mode):
+    if mode not in AVAILABLE_PROCESSING_MODES:
+        raise ValueError(f"Unsupported processing mode: {mode}")
+    return mode
+
+
 def ensure_directories():
     INPUT_DIR.mkdir(exist_ok=True)
     OUTPUT_DIR.mkdir(exist_ok=True)

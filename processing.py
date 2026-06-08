@@ -5,7 +5,17 @@ import numpy as np
 from scipy import signal
 from scipy.ndimage import uniform_filter1d
 
-from utils import NOTE_TO_PC, SCALE_INTERVALS, ensure_stereo, normalize_audio, to_mono
+from utils import (
+    NOTE_TO_PC,
+    PROCESSING_MODE_DSP_ONLY,
+    PROCESSING_MODE_PITCH_DSP,
+    PROCESSING_MODE_PITCH_ONLY,
+    SCALE_INTERVALS,
+    ensure_stereo,
+    normalize_audio,
+    to_mono,
+    validate_processing_mode,
+)
 
 
 FMIN_HZ = 65.40639
@@ -589,14 +599,20 @@ def pitch_align(
 
 def process_chain(audio, sr, settings, progress_callback=None, cancel_event=None):
     processed = audio.astype(np.float32).copy()
+    processing_mode = validate_processing_mode(settings.get("processing_mode", PROCESSING_MODE_PITCH_DSP))
+    run_pitch = processing_mode in (PROCESSING_MODE_PITCH_DSP, PROCESSING_MODE_PITCH_ONLY)
+    run_dsp = processing_mode in (PROCESSING_MODE_PITCH_DSP, PROCESSING_MODE_DSP_ONLY)
 
     def report_progress(stage):
         _check_cancel(cancel_event)
         if progress_callback:
             progress_callback(stage)
 
-    report_progress("Pitch detection...")
-    if settings.get("pitch_align_enabled", True):
+    if run_pitch:
+        report_progress("Pitch alignment...")
+    else:
+        report_progress("Skipping pitch alignment (DSP only mode)...")
+    if run_pitch and settings.get("pitch_align_enabled", True):
         processed = pitch_align(
             processed,
             sr,
@@ -612,6 +628,12 @@ def process_chain(audio, sr, settings, progress_callback=None, cancel_event=None
             range_explorer_seed=settings.get("range_explorer_seed"),
             cancel_event=cancel_event,
         )
+
+    if not run_dsp:
+        report_progress("Skipping DSP stages (pitch only mode)...")
+        report_progress("Finalizing...")
+        _check_cancel(cancel_event)
+        return normalize_audio(processed)
 
     report_progress("DC removal...")
     if settings.get("dc_remove_enabled"):
